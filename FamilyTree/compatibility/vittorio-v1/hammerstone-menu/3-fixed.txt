@@ -1,0 +1,4 @@
+local currentUI = manageUI.uiObjectsByModeType[manageUI.currentModeIndex]
+if currentUI.getTitle then
+    titleString = currentUI:getTitle()
+end

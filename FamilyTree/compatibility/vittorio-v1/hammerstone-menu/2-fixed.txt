@@ -1,0 +1,693 @@
+-- Local compatibility port: Sapiens 0.7.0.2 menu semantics + Hammerstone pagination.
+local function getDisplayButtonIndex(buttonIndex)
+    return ((buttonIndex - 1) % actionUI.wheelButtonsMaxCount) + 1
+end
+
+local function getButtonIndexFromDisplayIndex(displayIndex)
+    return (actionUI.wheelPageIndex - 1) * actionUI.wheelButtonsMaxCount + displayIndex
+end
+
+local function getLastPageIndex()
+    return math.ceil(actionUI.wheelButtonsCount / actionUI.wheelButtonsMaxCount)
+end
+
+local function updateButtons(showForPageChange)
+    local buttonCount = actionUI.wheelButtonsCount or 0
+    local baseObjectOrVertID = actionUI.baseObject and actionUI.baseObject.uniqueID
+        or (actionUI.baseVert and actionUI.baseVert.uniqueID)
+    if not showForPageChange then
+    buttonInfos = {}
+    buttonCount = 0
+    if actionUI.selectedObjects or actionUI.selectedVertInfos then
+
+        local availablePlans = nil
+        local objectOrVertIDs = {}
+        if actionUI.selectedObjects then
+            --mj:log("calling planHelper:availablePlansForObjectInfos via updateButtons actionUI.selectedObjects:", actionUI.selectedObjects)
+            availablePlans = planHelper:availablePlansForObjectInfos(actionUI.baseObject, actionUI.selectedObjects, world.tribeID)
+            for i,objectInfo in ipairs(actionUI.selectedObjects) do
+                objectOrVertIDs[i] = objectInfo.uniqueID
+            end
+            baseObjectOrVertID = actionUI.baseObject.uniqueID
+        else
+            availablePlans = planHelper:availablePlansForVertInfos(actionUI.baseVert, actionUI.selectedVertInfos, world.tribeID)
+            for i,vertInfo in ipairs(actionUI.selectedVertInfos) do
+                objectOrVertIDs[i] = vertInfo.uniqueID
+            end
+            baseObjectOrVertID = actionUI.baseVert.uniqueID
+        end
+
+        local availabilityRequest = {
+            objectOrVertIDs = objectOrVertIDs,
+            baseObjectOrVertID = baseObjectOrVertID,
+            plans = {},
+        }
+
+        if availablePlans then
+            
+
+            local groupPlanInfosByGroupTypeIndex = {}
+            local groupHeaderInfosByGroupTypeIndex = {}
+
+            local consolidatedPlans = {}
+            for i,planInfo in ipairs(availablePlans) do
+                local planGroupTypeIndex = planInfo.planGroupTypeIndex
+                if planGroupTypeIndex then
+                    local groupPlanInfos = groupPlanInfosByGroupTypeIndex[planGroupTypeIndex]
+                    if groupPlanInfos then
+                        table.insert(groupPlanInfos, planInfo)
+                        local headerPlanInfo = groupHeaderInfosByGroupTypeIndex[planGroupTypeIndex]
+                        headerPlanInfo.hasNonQueuedAvailable = headerPlanInfo.hasNonQueuedAvailable or planInfo.hasNonQueuedAvailable
+                        headerPlanInfo.hasQueuedPlans = headerPlanInfo.hasQueuedPlans or planInfo.hasQueuedPlans
+                        if planInfo.hasQueuedPlans then
+                            headerPlanInfo.anyQueuedPlansCanComplete = headerPlanInfo.anyQueuedPlansCanComplete or planInfo.anyQueuedPlansCanComplete
+                        end
+                        
+                        headerPlanInfo.hasManuallyPrioritizedQueuedPlan = headerPlanInfo.hasManuallyPrioritizedQueuedPlan or planInfo.hasManuallyPrioritizedQueuedPlan
+                        headerPlanInfo.unavailableReasonText = headerPlanInfo.unavailableReasonText or planInfo.unavailableReasonText
+                    else
+                        groupPlanInfos = {}
+                        groupPlanInfosByGroupTypeIndex[planGroupTypeIndex] = groupPlanInfos
+
+                        local subPlanInfo = planInfo
+                        table.insert(groupPlanInfos, subPlanInfo)
+
+                        local headerPlanInfo = mj:cloneTable(subPlanInfo)
+                        groupHeaderInfosByGroupTypeIndex[planGroupTypeIndex] = headerPlanInfo
+                        
+                        headerPlanInfo.groupPlanInfos = groupPlanInfos
+                        headerPlanInfo.planTypeIndex = planGroupTypeIndex
+
+                        headerPlanInfo.disabledPlanTypeIndexes = {} --todo populate initial disabledPlanTypeIndexes either from provided planStates if available or previously used
+
+                        table.insert(consolidatedPlans, headerPlanInfo)
+                    end
+                else
+                    table.insert(consolidatedPlans, planInfo)
+                end
+            end
+
+            --mj:log("consolidatedPlans:", consolidatedPlans)
+            --mj:log("groupHeaderInfosByGroupTypeIndex:", groupHeaderInfosByGroupTypeIndex)
+
+
+            for i,planInfo in ipairs(consolidatedPlans) do
+                do -- Every consolidated plan remains reachable through pagination.
+                    buttonCount = buttonCount + 1
+                    local buttonIndex = buttonCount
+                    local buttonFunction = nil
+                    local cancelClickFunction = nil
+                    local optionsClickFunction = nil
+                    local changeAssignedSapienClickFunction = nil
+                    local prioritizeFunction = nil
+                    local fillConstructionTypeIndex = nil
+                    local planTypeIndex = planInfo.planTypeIndex
+
+                    if planTypeIndex == plan.types.fill.index then
+                        if planInfo.hasQueuedPlans then
+                            --mj:log("selectedVertInfo:", selectedVertInfo)
+                            if actionUI.baseVert and actionUI.baseVert.planObjectInfo then
+                                local planStates = actionUI.baseVert.planObjectInfo.sharedState.planStates
+                                if planStates and planStates[world.tribeID] then
+                                    for j, planState in ipairs(planStates[world.tribeID]) do
+                                        if planState.planTypeIndex == planTypeIndex then
+                                            fillConstructionTypeIndex = planState.constructableTypeIndex
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        if not fillConstructionTypeIndex then
+                            fillConstructionTypeIndex = constructableUIHelper:getTerrainFillConstructableTypeIndex()
+                        end
+                    end
+
+                    local function getToolTipText(planTypeIndexToUse, inProgress)
+                        local toolTipText = nil
+
+                        if planTypeIndexToUse == plan.types.manageSapien.index then
+                            toolTipText = locale:get("ui_action_manageSapien", {name = actionUI.baseObject.sharedState.name})
+                        elseif planTypeIndexToUse == plan.types.manageTribeRelations.index then
+                            local tribeName = nil
+                            if actionUI.baseObject.sharedState and actionUI.baseObject.sharedState.tribeID then
+                                local info = mainThreadDestination.destinationInfosByID[actionUI.baseObject.sharedState.tribeID]
+                                if info then
+                                    tribeName = info.name
+                                end
+                            end
+                            if tribeName then
+                                toolTipText = locale:get("plan_manageTribeRelationsWithTribeName", {tribeName = tribeName})
+                            else
+                                toolTipText = plan.types[planTypeIndexToUse].name
+                            end
+                        else
+                            if inProgress and plan.types[planTypeIndexToUse].inProgress then 
+                                toolTipText = plan.types[planTypeIndexToUse].inProgress
+                            else
+                                toolTipText = plan.types[planTypeIndexToUse].name
+                            end
+                            
+                            local objectTypeIndex = planInfo.objectTypeIndex
+                            if objectTypeIndex then
+                                toolTipText = toolTipText .. " " .. gameObject.types[objectTypeIndex].plural
+                            elseif planTypeIndexToUse == plan.types.gather.index then
+                                if inProgress then
+                                    toolTipText = locale:get("plan_gatherAllInProgress")
+                                else
+                                    toolTipText = locale:get("plan_gatherAll")
+                                end
+                            elseif fillConstructionTypeIndex then
+                                toolTipText = toolTipText .. " " .. constructable.types[fillConstructionTypeIndex].name
+                            elseif planTypeIndexToUse == plan.types.clone.index then
+                                local constructableTypeIndexToUse = constructable:getConstructableTypeIndexForCloneOrRebuild(actionUI.selectedObjects[1])
+                                --mj:log("constructableTypeIndexToUse:", constructableTypeIndexToUse)
+                                if constructableTypeIndexToUse then
+                                    local constructableType = constructable.types[constructableTypeIndexToUse]
+                                    local classificationType = constructable.classifications[constructableType.classification]
+
+                                    if not constructableType.plural then
+                                        mj:error("no plural for constructableType:", constructableType)
+                                    end
+                                    
+                                    toolTipText = classificationType.actionName .. " " .. constructableType.plural
+                                end
+                            elseif planInfo.researchTypeIndex then
+                                local clueText = nil
+                                if planInfo.discoveryCraftableTypeIndex then 
+                                    local constructableType = constructable.types[planInfo.discoveryCraftableTypeIndex]
+                                    if constructableType.constructableResearchClueText then
+                                        clueText = constructableType.constructableResearchClueText
+                                    end
+                                end
+
+                                if not clueText then
+                                    clueText = research.types[planInfo.researchTypeIndex].clueText
+                                end
+
+                                if clueText then
+                                    toolTipText = toolTipText .. ": " .. clueText
+                                end
+
+                                --mj:log("planInfo:", planInfo)
+                                --toolTipText = research.types[planInfo.researchTypeIndex].name
+                            end
+                        end
+
+                        if planInfo.cancelIsElsewhere then
+                            toolTipText = toolTipText .. " " .. locale:get("misc_elsewhere")
+                        end
+
+                        return toolTipText
+                    end
+
+                    local toolTipText = getToolTipText(planTypeIndex, false)
+                
+
+                    local cancelToolTipText = nil
+
+                    if planTypeIndex == plan.types.fill.index then
+                        cancelToolTipText = locale:get("ui_action_stop") .. " " .. getToolTipText(planTypeIndex, true)
+                    else
+                        --[[if planInfo.cancelOverrideDisplayedText then
+                            cancelToolTipText = "Cancel " .. planInfo.cancelOverrideDisplayedText
+                        else]]
+                            cancelToolTipText = locale:get("ui_action_stop") .. " " .. getToolTipText(planTypeIndex, true)
+                    -- end
+                    end
+
+                    if plan.types[planTypeIndex].checkCanCompleteForRadialUI then
+                        
+                        local addInfo = {
+                            planTypeIndex = planTypeIndex,
+                            objectTypeIndex = planInfo.objectTypeIndex,
+                            researchTypeIndex = planInfo.researchTypeIndex,
+                            discoveryCraftableTypeIndex = planInfo.discoveryCraftableTypeIndex,
+                        }
+
+                        if planTypeIndex == plan.types.fill.index then
+                            addInfo.constructableTypeIndex = fillConstructionTypeIndex
+                            addInfo.restrictedResourceObjectTypes = world:getConstructableRestrictedObjectTypes(addInfo.constructableTypeIndex, false)
+                            addInfo.restrictedToolObjectTypes = world:getConstructableRestrictedObjectTypes(addInfo.constructableTypeIndex, true)
+                        end
+
+                        table.insert(availabilityRequest.plans, addInfo)
+                    end
+
+                    if planInfo.hasNonQueuedAvailable then
+
+
+                        buttonFunction = function(wasQuickSwipeAction, hasConfirmed)
+                            if (not hasConfirmed) and planInfo.requiresConfirmation then --todo requiresConfirmation assumes banish only
+                                if alertPanel:hidden() then
+                                    alertPanel:show(actionUI.mainView, locale:get("action_banish"), locale:get("banish_areYouSure", {name = actionUI.baseObject.sharedState.name}), {
+                                        {
+                                            isDefault = true,
+                                            name = locale:get("action_banish"),
+                                            action = function()
+                                                alertPanel:hide()
+                                                buttonFunction(wasQuickSwipeAction, true)
+                                            end
+                                        },
+                                        {
+                                            isCancel = true,
+                                            name = locale:get("ui_action_cancel"),
+                                            action = function()
+                                                alertPanel:hide()
+                                                actionUI:animateOutForOptionSelected()
+                                            end
+                                        }
+                                    })
+                                end
+                                return
+                            end
+                            audio:playUISound(uiCommon.orderSoundFile)
+                            if planInfo.researchTypeIndex then
+                                world:setHasQueuedResearchPlan(true)
+                            end
+
+                            
+                            --mj:log("planInfo:", planInfo)
+                            if planTypeIndex == plan.types.moveTo.index then
+                                actionUI:animateOutForOptionSelected()
+                                sapienMoveUI:show(objectOrVertIDs)
+                            elseif planTypeIndex == plan.types.haulObject.index then
+                                actionUI:animateOutForOptionSelected()
+                                objectMoveUI:show(objectOrVertIDs, inspectUI.baseObjectOrVertInfo)
+                            elseif planTypeIndex == plan.types.stop.index then
+                                logicInterface:callServerFunction("cancelSapienOrders", {
+                                    sapienIDs = objectOrVertIDs,
+                                })
+                                actionUI:animateOutForOptionSelected()
+                            elseif planTypeIndex == plan.types.wait.index then
+                                logicInterface:callServerFunction("addWaitOrder", {
+                                    sapienIDs = objectOrVertIDs,
+                                })
+                                actionUI:animateOutForOptionSelected()
+                            elseif planTypeIndex == plan.types.clone.index then
+                                if inspectUI.baseObjectOrVertInfo then
+                                    buildModeInteractUI:showForDuplication(inspectUI.baseObjectOrVertInfo)
+                                    actionUI:animateOutForOptionSelected()
+                                end
+                            elseif planTypeIndex == plan.types.craft.index or 
+                            planTypeIndex == plan.types.manageStorage.index or 
+                            planTypeIndex == plan.types.manageSapien.index or 
+                            planTypeIndex == plan.types.constructWith.index or 
+                            planTypeIndex == plan.types.rebuild.index then
+                                inspectUI:showInspectPanelForActionUISelectedPlanType(planTypeIndex)
+                            elseif planTypeIndex == plan.types.allowUse.index then
+                                logicInterface:callServerFunction("changeAllowItemUse", {
+                                    objectIDs = objectOrVertIDs,
+                                    allowItemUse = true,
+                                })
+                                --if wasQuickSwipeAction then
+                                    actionUI:animateOutForOptionSelected()
+                                --[[else
+                                    buttonInfos[buttonIndex].disabled = true
+                                    local wheel = actionUI.wheels[actionUI.currentWheelIndex]
+                                    updateVisuals(wheel.segments[getDisplayButtonIndex(buttonIndex)], wheel.segments[getDisplayButtonIndex(buttonIndex)].userData) --todo this is untested, will only show up with lag, needs to be tested
+                                end]]
+                            elseif planTypeIndex == plan.types.manageTribeRelations.index then
+                                tribeRelationsUI:show(mainThreadDestination.destinationInfosByID[actionUI.baseObject.sharedState.tribeID], nil, nil, nil, false)
+                                actionUI:animateOutForOptionSelected()
+                            elseif planTypeIndex == plan.types.startRoute.index then
+                                logicInterface:createLogisticsRoute(objectOrVertIDs[1], nil, function(uiRouteInfo)
+                                    if uiRouteInfo then
+                                        gameUI:hideAllUI(false)
+                                        storageLogisticsDestinationsUI:show(uiRouteInfo)
+                                    end
+                                end)
+                                actionUI:animateOutForOptionSelected()
+                            elseif planTypeIndex == plan.types.attack.index or planTypeIndex == plan.types.defend.index then
+                                for j,subPlanInfo in ipairs(planInfo.groupPlanInfos) do
+                                    --if not disabled
+                                    if subPlanInfo.hasNonQueuedAvailable then
+                                        if not actionUIOuterButtons:getPlanDisabled(planTypeIndex, subPlanInfo.planTypeIndex) then
+                                            sendPlan(subPlanInfo.planTypeIndex, subPlanInfo, objectOrVertIDs, nil)
+                                        end
+                                    end
+                                end
+                                --tribeRelationsUI:show(mainThreadDestination.destinationInfosByID[actionUI.baseObject.sharedState.tribeID], nil, nil, nil, false)
+                                --actionUI:animateOutForOptionSelected()
+                                --attack_handToHand
+                            else
+                                sendPlan(planTypeIndex, planInfo, objectOrVertIDs, fillConstructionTypeIndex)
+                                actionUI:animateOutForOptionSelected()
+                            end
+
+                            
+
+                            if not tutorialUI:multiSelectComplete() then
+                                local objectCount = #objectOrVertIDs
+                                if objectCount > 1 then
+                                    tutorialUI:multiSelectWasIssued(objectCount)
+                                end
+                            end
+                        end
+                        
+                    end
+
+                    local assignedSapienInfos = nil
+                    local assignedCountsByPlanTypeIndex = {}
+
+                    if planInfo.hasQueuedPlans then
+
+                        if planTypeIndex == plan.types.attack.index or planTypeIndex == plan.types.defend.index then
+                            cancelClickFunction = function()
+                                audio:playUISound(uiCommon.cancelSoundFile)
+                                for j,subPlanInfo in ipairs(planInfo.groupPlanInfos) do
+                                    logicInterface:callServerFunction("cancelPlans", {
+                                        planTypeIndex = subPlanInfo.planTypeIndex,
+                                        objectTypeIndex = subPlanInfo.objectTypeIndex,
+                                        researchTypeIndex = subPlanInfo.researchTypeIndex,
+                                        discoveryCraftableTypeIndex = subPlanInfo.discoveryCraftableTypeIndex,
+                                        objectOrVertIDs = objectOrVertIDs,
+                                    })
+                                end
+                            end
+                        else
+                            cancelClickFunction = function()
+                                audio:playUISound(uiCommon.cancelSoundFile)
+                                if planInfo.cancelIsFollowerOrderQueue then
+                                    logicInterface:callServerFunction("cancelSapienOrders", {
+                                        sapienIDs = objectOrVertIDs,
+                                        planTypeIndex = planTypeIndex,
+                                    })
+                                elseif planTypeIndex == plan.types.wait.index then
+                                    logicInterface:callServerFunction("cancelWaitOrder", {
+                                        sapienIDs = objectOrVertIDs,
+                                    })
+                                else
+                                    local planTypeIndexToUseForCancel = planTypeIndex
+
+                                    if planTypeIndexToUseForCancel == plan.types.constructWith.index then
+                                        planTypeIndexToUseForCancel = plan.types.craft.index
+                                    end
+                                    logicInterface:callServerFunction("cancelPlans", {
+                                        planTypeIndex = planTypeIndexToUseForCancel,
+                                        objectTypeIndex = planInfo.objectTypeIndex,
+                                        researchTypeIndex = planInfo.researchTypeIndex,
+                                        discoveryCraftableTypeIndex = planInfo.discoveryCraftableTypeIndex,
+                                        objectOrVertIDs = objectOrVertIDs,
+                                    })
+                                end
+
+                            -- if planInfo.hideUIOnCancel then
+                                --   actionUI:animateOutForOptionSelected(buttonIndex, nil)
+                            -- end
+                                
+                                planInfo.hasQueuedPlans = false
+                                local wheel = actionUI.wheels[actionUI.currentWheelIndex]
+                                updateVisuals(wheel.segments[getDisplayButtonIndex(buttonIndex)], wheel.segments[getDisplayButtonIndex(buttonIndex)].userData) --todo this is untested, will only show up with lag, needs to be tested
+                            end
+                        end
+
+                        if (not planInfo.cancelIsFollowerOrderQueue) and (planTypeIndex ~= plan.types.wait.index) and (not planInfo.cancelIsElsewhere) then
+                            prioritizeFunction = function()
+                                local planTypeIndexToUse = planTypeIndex
+
+                                if planTypeIndexToUse == plan.types.constructWith.index then
+                                    planTypeIndexToUse = plan.types.craft.index
+                                end
+
+                                if planInfo.hasManuallyPrioritizedQueuedPlan then
+                                    logicInterface:callServerFunction("deprioritizePlans", {
+                                        objectOrVertIDs = objectOrVertIDs,
+                                        planTypeIndex = planTypeIndexToUse,
+                                        objectTypeIndex = planInfo.objectTypeIndex,
+                                        researchTypeIndex = planInfo.researchTypeIndex,
+                                        discoveryCraftableTypeIndex = planInfo.discoveryCraftableTypeIndex,
+                                    })
+                                    --todo maybe update visuals
+                                else
+                                    logicInterface:callServerFunction("prioritizePlans", {
+                                        objectOrVertIDs = objectOrVertIDs,
+                                        planTypeIndex = planTypeIndexToUse,
+                                        objectTypeIndex = planInfo.objectTypeIndex,
+                                        researchTypeIndex = planInfo.researchTypeIndex,
+                                        discoveryCraftableTypeIndex = planInfo.discoveryCraftableTypeIndex,
+                                    })
+
+                                    tutorialUI:prioritizationWasIssued()
+                                end
+                            end
+                        end
+
+                        if #objectOrVertIDs == 1 and (not planInfo.cancelIsElsewhere) and (planInfo.anyQueuedPlansCanComplete) then
+                            local firstObjectInfo = nil
+                            if actionUI.baseVert then
+                                firstObjectInfo = actionUI.baseVert.planObjectInfo
+                            else
+                                firstObjectInfo = actionUI.selectedObjects[1]
+                            end
+
+                            local function getPlanTypeMatches(orderContext)
+                                --mj:log("getPlanTypeMatches:", orderContext, " planTypeIndex:", planTypeIndex)
+                                if orderContext.planTypeIndex == planTypeIndex then
+                                    return true
+                                end
+
+                                if planInfo.groupPlanInfos then
+                                    for j,subPlanInfo in ipairs(planInfo.groupPlanInfos) do
+                                        if orderContext.planTypeIndex == subPlanInfo.planTypeIndex and orderContext.researchTypeIndex == subPlanInfo.researchTypeIndex then
+                                            return true
+                                        end
+                                    end
+                                end
+
+                                return false
+                            end
+
+                            if firstObjectInfo and firstObjectInfo.sharedState then
+                                local assignedSapienIDs = firstObjectInfo.sharedState.assignedSapienIDs
+                                if assignedSapienIDs then
+                                    for assignedSapienID,planTypeIndexOrTrue in pairs(assignedSapienIDs) do
+                                        local sapienInfo = playerSapiens:getInfo(assignedSapienID)
+                                        if sapienInfo then
+                                            local orderQueue = sapienInfo.sharedState.orderQueue
+                                            if orderQueue and orderQueue[1] then
+                                                local orderContext = orderQueue[1].context
+                                                if orderContext and orderContext.planObjectID == firstObjectInfo.uniqueID and 
+                                                getPlanTypeMatches(orderContext) and 
+                                            ((not planInfo.objectTypeIndex) or (not orderContext.objectTypeIndex) or orderContext.objectTypeIndex == planInfo.objectTypeIndex) then
+                                                    --mj:log("found assigned sapien info:", sapienInfo)
+                                                    if not assignedSapienInfos then
+                                                        assignedSapienInfos = {}
+                                                    end
+                                                    table.insert(assignedSapienInfos, {
+                                                        uniqueID = assignedSapienID,
+                                                        objectTypeIndex = gameObject.types.sapien.index,
+                                                        sharedState = sapienInfo.sharedState,
+                                                    })
+                                                    assignedCountsByPlanTypeIndex[orderContext.planTypeIndex] = (assignedCountsByPlanTypeIndex[orderContext.planTypeIndex] or 0) + 1
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+
+                            if not planInfo.sapienAssignButtonShouldBeHidden then
+                                changeAssignedSapienClickFunction = function(assignButtonIndex)
+
+                                    local assignedInfo = assignedSapienInfos and assignedSapienInfos[assignButtonIndex]
+                                    --mj:log("assignButtonIndex:", assignButtonIndex, " assignedInfo:", assignedInfo)
+
+                                    if assignedInfo then
+                                        logicInterface:callServerFunction("cancelAll", {
+                                            objectIDs = {assignedInfo.uniqueID},
+                                        })
+                                    else
+                                        actionUI:animateOutForOptionSelected()
+                                        changeAssignedSapienUI:show(firstObjectInfo, planInfo)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    
+                    local foundAvailablePlanWithoutMaxAssigned = false
+                    for thisPlanTypeIndex, assignedCount in pairs(assignedCountsByPlanTypeIndex) do
+                        local maxAssignCount = plan.types[thisPlanTypeIndex].maxAssignCount or 1
+                        --mj:log("maxAssignCount:",maxAssignCount, " thisPlanTypeIndex:", thisPlanTypeIndex)
+                        if assignedCount < maxAssignCount then
+                            foundAvailablePlanWithoutMaxAssigned = true
+                        end
+                    end
+
+                   -- mj:log("assignedCountsByPlanTypeIndex:", assignedCountsByPlanTypeIndex)
+                    --mj:log("foundAvailablePlanWithoutMaxAssigned:", foundAvailablePlanWithoutMaxAssigned)
+
+                    if planInfo.hasExtraOptionsPanel then
+                        optionsClickFunction = function()
+                            inspectUI:showInspectPanelForActionUIOptionsButton(planTypeIndex)
+                        end
+                    end
+
+                    local isDestructive = false
+                    if planInfo.isDestructiveOverride ~= nil then
+                        isDestructive = planInfo.isDestructiveOverride
+                    else
+                        isDestructive = plan.types[planTypeIndex].isDestructive or (planInfo.researchTypeIndex and research.types[planInfo.researchTypeIndex].isDestructive)
+                    end
+
+                    buttonInfos[buttonIndex] = {
+                        toolTipText = toolTipText,
+                        cancelToolTipText = cancelToolTipText,
+                        clickFunction = buttonFunction,
+                        cancelClickFunction = cancelClickFunction,
+                        optionsClickFunction = optionsClickFunction,
+                        changeAssignedSapienClickFunction = changeAssignedSapienClickFunction,
+                        prioritizeFunction = prioritizeFunction,
+                        planTypeIndex = planTypeIndex,
+                        objectTypeIndex = planInfo.objectTypeIndex,
+                        researchTypeIndex = planInfo.researchTypeIndex,
+                        fillConstructionTypeIndex = fillConstructionTypeIndex,
+                        planInfo = planInfo,
+                        disabled = not planInfo.hasNonQueuedAvailable,
+                        assignedSapienInfos = assignedSapienInfos,
+                        isDestructive = isDestructive,
+                        hasMaxSapiensAssigned = (not foundAvailablePlanWithoutMaxAssigned),
+                    }
+                end
+
+            end
+        end
+
+        planAvailibilityRequestCounter = planAvailibilityRequestCounter + 1
+        local thisRequestCounter = planAvailibilityRequestCounter
+
+        logicInterface:callServerFunction("checkPlanAvailability", availabilityRequest, function(result)
+            --mj:log("checkPlanAvailability request:", availabilityRequest, " result:", result)
+            if thisRequestCounter == planAvailibilityRequestCounter then
+                updatePlanAvailibility(result)
+                cachedAvailibilityResult = result
+                cachedAvailibilityResultObjectID = baseObjectOrVertID
+            end
+        end)
+    else
+        mj:error("No selectedVertInfo or actionUI.selectedObjects")
+        return false
+    end
+
+    end -- rebuild plan information only when selection changes
+
+    local newWheelIndex = actionUI.currentWheelIndex
+    local newInnerWheelIndex = actionUI.currentInnerWheelIndex
+
+    if not showForPageChange then
+        actionUI.wheelButtonsCount = buttonCount
+        actionUI.wheelPageIndex = 1
+
+        if actionUI.wheelButtonsCount > actionUI.wheelButtonsMaxCount then
+            actionUI.innerWheelHasPages = true
+            newInnerWheelIndex = 4
+        else
+            actionUI.innerWheelHasPages = false
+            newInnerWheelIndex = 2
+        end
+    end
+
+    if actionUI.wheelButtonsCount > actionUI.wheelButtonsMaxCount then
+        actionUI.innerWheels[4].segments[1].userData.disabled = actionUI.wheelPageIndex == getLastPageIndex()
+        actionUI.innerWheels[4].segments[3].userData.disabled = actionUI.wheelPageIndex == 1
+    end
+
+    if actionUI.currentInnerWheelIndex ~= newInnerWheelIndex then
+        if actionUI.currentInnerWheelIndex then
+            actionUI.innerWheels[actionUI.currentInnerWheelIndex].view.hidden = true
+        end
+
+        actionUI.currentInnerWheelIndex = newInnerWheelIndex
+        actionUI.innerWheels[actionUI.currentInnerWheelIndex].view.hidden = false
+    end
+
+    if actionUI.currentInnerWheelIndex == 4 then
+        if actionUI.wheelPageIndex == getLastPageIndex() then
+            newWheelIndex = getDisplayButtonIndex(actionUI.wheelButtonsCount)
+        else
+            newWheelIndex = actionUI.wheelButtonsMaxCount
+        end
+    else
+        newWheelIndex = actionUI.wheelButtonsCount
+    end
+
+    if actionUI.currentWheelIndex ~= newWheelIndex then
+        if buttonCount < 1 then
+            mj:error("No buttons to display")
+            error()
+            return false
+        end
+
+        if actionUI.currentWheelIndex then
+            actionUI.wheels[actionUI.currentWheelIndex].view.hidden = true
+        end
+
+        actionUI.currentWheelIndex = newWheelIndex
+        actionUI.wheels[actionUI.currentWheelIndex].view.hidden = false
+    end
+
+    local wheel = actionUI.wheels[actionUI.currentWheelIndex]
+    for segmentIndex=1,actionUI.currentWheelIndex do
+        local buttonIndex = getButtonIndexFromDisplayIndex(segmentIndex)
+        local segment = wheel.segments[segmentIndex]
+        local segmentTable = segment.userData
+        segmentTable.clickFunction = buttonInfos[buttonIndex].clickFunction
+        segmentTable.toolTipText = buttonInfos[buttonIndex].toolTipText
+        segmentTable.cancelToolTipText = buttonInfos[buttonIndex].cancelToolTipText
+        segmentTable.planTypeIndex = buttonInfos[buttonIndex].planTypeIndex
+        segmentTable.objectTypeIndex = buttonInfos[buttonIndex].objectTypeIndex
+        segmentTable.researchTypeIndex = buttonInfos[buttonIndex].researchTypeIndex
+        segmentTable.fillConstructionTypeIndex = buttonInfos[buttonIndex].fillConstructionTypeIndex
+        segmentTable.planInfo = buttonInfos[buttonIndex].planInfo
+        segmentTable.disabled = buttonInfos[buttonIndex].disabled
+        segmentTable.hasMaxSapiensAssigned = buttonInfos[buttonIndex].hasMaxSapiensAssigned
+        segmentTable.assignedSapienInfos = buttonInfos[buttonIndex].assignedSapienInfos
+        segmentTable.cancelClickFunction = buttonInfos[buttonIndex].cancelClickFunction
+        segmentTable.optionsClickFunction = buttonInfos[buttonIndex].optionsClickFunction
+        segmentTable.changeAssignedSapienClickFunction = buttonInfos[buttonIndex].changeAssignedSapienClickFunction
+        segmentTable.prioritizeFunction = buttonInfos[buttonIndex].prioritizeFunction
+        segmentTable.availibilityResult = nil
+
+        if segmentTable.planInfo.isDestructiveOverride ~= nil then
+            segmentTable.isDestructive = segmentTable.planInfo.isDestructiveOverride
+        else
+            segmentTable.isDestructive = plan.types[segmentTable.planTypeIndex].isDestructive or (segmentTable.researchTypeIndex and research.types[segmentTable.researchTypeIndex].isDestructive)
+        end
+
+        uiStandardButton:setClickFunction(segmentTable.cancelButton, buttonInfos[buttonIndex].cancelClickFunction)
+        uiStandardButton:setClickFunction(segmentTable.changeAssignedSapienButton, function()
+            segmentTable.changeAssignedSapienClickFunction(1)
+        end)
+        uiStandardButton:setClickFunction(segmentTable.prioritizeButton, buttonInfos[buttonIndex].prioritizeFunction)
+        
+        updateVisuals(segment, segmentTable)
+    end
+
+    local innerWheel = actionUI.innerWheels[actionUI.currentInnerWheelIndex]
+    for innerSegmentIndex = 1, actionUI.currentInnerWheelIndex do 
+        local innerSegment = innerWheel.segments[innerSegmentIndex]
+        local innerSegmentTable = innerSegment.userData
+
+        updateInnerSegmentVisuals(innerSegment, innerSegmentTable)
+    end
+
+
+    actionUIOuterButtons:update()
+    
+    if cachedAvailibilityResultObjectID == baseObjectOrVertID then
+        updatePlanAvailibility(cachedAvailibilityResult)
+    end
+
+    return true
+end
+
+function actionUI:displayWheelPage(pageOffset)
+    local pageIndex = actionUI.wheelPageIndex + pageOffset
+    if pageIndex < 1 or pageIndex > getLastPageIndex() then
+        return false
+    end
+    actionUI.wheelPageIndex = pageIndex
+    return updateButtons(true)
+end

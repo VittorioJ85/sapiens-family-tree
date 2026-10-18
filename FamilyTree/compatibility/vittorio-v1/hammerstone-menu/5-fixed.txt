@@ -1,0 +1,16 @@
+-- Sapiens 0.7 already owns titleView/titleIcon/titleTextView on manageUI.
+-- Keep its layout and extend only dynamic title lookup for mod panels.
+local patch = {
+    version = "0.7.0.2",
+    patchOrder = 0,
+    debugCopyAfter = false,
+    operations = {
+        [1] = {
+            type = "replaceAt",
+            startAt = {"local function updateCurrentView(", "if manageUI.currentModeIndex == modeTypes.options then"},
+            endAt = "end",
+            repl = {chunk = "manageUI_changeTitle", indent = 1},
+        },
+    },
+}
+return patch
